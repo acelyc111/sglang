@@ -8,7 +8,7 @@ import logging
 import random
 import urllib
 from itertools import chain
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import aiohttp
 import orjson
@@ -46,24 +46,29 @@ class PrefillConfig:
 
 class MiniLoadBalancer:
     def __init__(self, prefill_configs: List[PrefillConfig], decode_servers: List[str]):
-        self.prefill_configs = prefill_configs
+        self.prefill_configs = Set[prefill_configs]
         self.prefill_servers = [p.url for p in prefill_configs]
-        self.decode_servers = decode_servers
+        assert len(self.prefill_configs) == len(self.prefill_servers), "No prefill servers available"
+        self.decode_servers = Set[decode_servers]
 
-    def add_prefill_server(self, new_prefill_config: PrefillConfig):
-        self.prefill_configs.append(new_prefill_config)
+    def add_prefill_server(self, new_prefill_config: PrefillConfig) -> bool:
+        added = new_prefill_config not in self.prefill_configs
+        self.prefill_configs.add(new_prefill_config)
         self.prefill_servers.append(new_prefill_config.url)
+        return added
 
-    def add_decode_server(self, new_decode_server: str):
-        self.decode_servers.append(new_decode_server)
+    def add_decode_server(self, new_decode_server: str) -> bool:
+        added = new_decode_server not in self.decode_servers
+        self.decode_servers.add(new_decode_server)
+        return added
 
     def select_pair(self):
         # TODO: return some message instead of panic
         assert len(self.prefill_configs) > 0, "No prefill servers available"
         assert len(self.decode_servers) > 0, "No decode servers available"
 
-        prefill_config = random.choice(self.prefill_configs)
-        decode_server = random.choice(self.decode_servers)
+        prefill_config = random.choice(list(self.prefill_configs))
+        decode_server = random.choice(list(self.decode_servers))
         return prefill_config.url, prefill_config.bootstrap_port, decode_server
 
     async def generate(

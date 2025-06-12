@@ -229,6 +229,7 @@ class ServerArgs:
     disaggregation_ib_device: Optional[str] = None
     num_reserved_decode_tokens: int = 512  # used for decode kv cache offload in PD
     pdlb_url: Optional[str] = None
+    pdlb_registration_interval_secs: int = 30  # Interval for periodic registration
 
     def __post_init__(self):
         # Expert parallelism
@@ -1525,6 +1526,12 @@ class ServerArgs:
             type=str,
             default=None,
             help="The URL of the PD disaggregation load balancer. If set, the prefill/decode server will register with the load balancer.",
+        )
+        parser.add_argument(
+            "--pdlb-registration-interval-secs",
+            type=int,
+            default=ServerArgs.pdlb_registration_interval_secs,
+            help="The interval in seconds for periodic registration with the PD disaggregation load balancer.",
         )
 
     @classmethod

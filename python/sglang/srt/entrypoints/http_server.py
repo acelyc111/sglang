@@ -919,12 +919,25 @@ def _wait_and_warmup(
         kill_process_tree(os.getpid())
 
     if server_args.pdlb_url is not None:
-        register_disaggregation_server(
-            server_args.disaggregation_mode,
-            server_args.port,
-            server_args.disaggregation_bootstrap_port,
-            server_args.pdlb_url,
+        # Start background thread for periodic registration
+        def registration_worker():
+            while True:
+                try:
+                    register_disaggregation_server(
+                        server_args.disaggregation_mode,
+                        server_args.port,
+                        server_args.disaggregation_bootstrap_port,
+                        server_args.pdlb_url,
+                    )
+                except Exception as e:
+                    logger.warning(f"Periodic registration failed: {str(e)}")
+                time.sleep(server_args.registration_interval_seconds)
+
+        registration_thread = threading.Thread(
+            target=registration_worker,
+            daemon=True,  # Daemon thread will exit when main thread exits
         )
+        registration_thread.start()
 
     if launch_callback is not None:
         launch_callback()
