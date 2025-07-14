@@ -235,8 +235,10 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.get("/health_generate")
-async def health_generate(request: Request) -> Response:
+@app.api_route("/health_generate", methods=["GET", "POST"])
+async def health_generate(
+    request: Request, obj: Optional[GenerateReqInput] = None
+) -> Response:
     """Check the health of the inference server by generating one token."""
     if _global_state.tokenizer_manager.gracefully_exit:
         logger.info("Health check request received during shutdown. Returning 503.")
@@ -253,15 +255,27 @@ async def health_generate(request: Request) -> Response:
             input_ids=[0],
             sampling_params=sampling_params,
             log_metrics=False,
+            bootstrap_host=obj.bootstrap_host if obj is not None else None,
+            bootstrap_port=obj.bootstrap_port if obj is not None else None,
+            bootstrap_room=obj.bootstrap_room if obj is not None else None,
         )
     else:
         gri = EmbeddingReqInput(
             rid=rid, input_ids=[0], sampling_params=sampling_params, log_metrics=False
         )
 
+    task_failed = False
+
     async def gen():
-        async for _ in _global_state.tokenizer_manager.generate_request(gri, request):
-            break
+        nonlocal task_failed
+        try:
+            async for _ in _global_state.tokenizer_manager.generate_request(
+                gri, request
+            ):
+                break
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            task_failed = True
 
     # This request is a special request.
     # If the server already has something running, this request will be ignored, so it creates zero overhead.
@@ -270,13 +284,19 @@ async def health_generate(request: Request) -> Response:
 
     # As long as we receive any response from the detokenizer/scheduler, we consider the server is healthy.
     tic = time.time()
-    while time.time() < tic + HEALTH_CHECK_TIMEOUT:
-        await asyncio.sleep(1)
+    while time.perf_counter() < tic + HEALTH_CHECK_TIMEOUT:
+        # Sleep shorter, check health success sooner at the first time.
+        await asyncio.sleep(0.2)
+
+        if task_failed is True:
+            break
+
         if _global_state.tokenizer_manager.last_receive_tstamp > tic:
             task.cancel()
             _global_state.tokenizer_manager.rid_to_state.pop(rid, None)
             _global_state.tokenizer_manager.health_check_failed = False
             return Response(status_code=200)
+        await asyncio.sleep(0.8)
 
     task.cancel()
     tic_time = time.strftime("%H:%M:%S", time.localtime(tic))
