@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.configuration_utils import PretrainedConfig
 
-from python.sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
@@ -22,7 +22,7 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.layers.activation import SiluAndMul
-from sglang.srt.layers.attention.lightning_attn import (
+from sglang.srt.layers.attention.triton_ops.lightning_attn import (
     lightning_attention,
     linear_decode_forward_triton,
 )
@@ -666,7 +666,7 @@ class MiniMaxText01Attention(nn.Module):
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
@@ -1042,11 +1042,11 @@ class MiniMaxText01Model(nn.Module):
                 decoder_kwargs["expert_num"] = 1
 
             return MiniMaxText01DecoderLayer(
-                layer_config, **decoder_kwargs, layer_id=layer_idx, prefix=prefix
+                layer_config, **decoder_kwargs, prefix=prefix
             )
 
         # , self.start_layer, self.end_layer
-        self.layers = make_layers(
+        self.layers, self.start_layer, self.end_layer = make_layers(
             config.num_hidden_layers,
             layer_fn,
             pp_rank=self.pp_group.rank_in_group,
@@ -1205,7 +1205,6 @@ class MiniMaxText01ForCausalLM(nn.Module):
 
     def __init__(
         self,
-        *,
         config=PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
