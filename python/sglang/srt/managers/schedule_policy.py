@@ -96,13 +96,16 @@ class SchedulePolicy:
         )
 
     def calc_priority(self, waiting_queue: List[Req]) -> bool:
+        prefix_computed = False
         if self.policy == CacheAgnosticPolicy.FCFS:
             # A shortcut for FCFS
+<<<<<<< Updated upstream
             return False
+=======
+            return prefix_computed
+>>>>>>> Stashed changes
 
         policy = self._determine_active_policy(waiting_queue)
-
-        prefix_computed = False
         if isinstance(policy, CacheAwarePolicy):
             prefix_computed = True
             temporary_deprioritized = self._compute_prefix_matches(
