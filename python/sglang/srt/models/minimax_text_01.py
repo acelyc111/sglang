@@ -22,7 +22,10 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.layers.activation import SiluAndMul
-from sglang.srt.layers.attention.triton_ops.lightning_attn import (
+from sglang.srt.layers.attention.lightning_attn_backend import (
+    LightningAttentionMetadata,
+    LightningAttentionBackend,
+    build_slope_tensor,
     lightning_attention,
     linear_decode_forward_triton,
 )
@@ -39,7 +42,8 @@ from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
-from sglang.srt.layers.rotary_embedding import RotaryEmbedding
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.rotary_embedding import RotaryEmbedding, get_rope
 from sglang.srt.layers.utils import PPMissingLayer
 from sglang.srt.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE,
@@ -125,7 +129,9 @@ class MiniMaxText01RMSNormTP(CustomOp):
         weight = self.weight
         if x.size(-1) != self.weight.size(0):
             if self.weight.size(0) < x.size(-1):
-                repeat_count = (x.size(-1) + self.weight.size(0)) // x.size(-1)
+                repeat_count = (
+                                   x.size(-1) + self.weight.size(0) - 1
+                               ) // self.weight.size(0)
                 full_weight = self.weight.repeat(repeat_count)
                 weight = full_weight[: x.size(-1)]
             else:
@@ -252,40 +258,6 @@ class MiniMaxText01MoE(nn.Module):
         return final_hidden
 
 
-class MiniMaxText01LinearKernel:
-    """
-    Linear kernel for MiniMaxText01 model.
-    Optimizes the forward pass of the linear attention layer.
-    """
-
-    @staticmethod
-    def jit_linear_forward_prefix(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kv_caches: torch.Tensor,
-        slope_rate: torch.Tensor,
-        block_size: int,
-        layer_idx: int = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        slope_rate = slope_rate.to(torch.float32)
-        should_pad_dim = q.dim() == 3
-        if should_pad_dim:
-            q = q.unsqueeze(0)
-            k = k.unsqueeze(0)
-            v = v.unsqueeze(0)
-        b, h, n, d = q.shape
-        e = d
-        kv_history = kv_caches.reshape(1, h, d, e).contiguous()
-        output, kv_history = lightning_attention(
-            q, k, v, slope_rate, block_size=block_size, kv_history=kv_history
-        )
-        kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
-        assert output.shape[0] == 1, "batch size must be 1"
-        return rearrange(output.squeeze(0), "h n d -> n (h d)")
-
-
 @dataclass
 class MinimaxCacheParams:
     minimax_cache: torch.Tensor = torch.Tensor()
@@ -312,127 +284,94 @@ class MinimaxCacheManager(ConstantSizeCache):
         self.cache[:, to_index].copy_(self.cache[:, from_index], non_blocking=True)
 
 
-@dataclass
-class AttentionMetadata:
-    """
-    Attention metadata for prefill and decode batched together.
-    """
-
-    num_prefills: int
-    num_prefill_tokens: int
-    num_decode_tokens: int
-    slot_mapping: torch.Tensor
-    multi_modal_placeholder_index_maps: Any
-    enable_kv_scales_calculation: bool
-
-    @property
-    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
-        return self
-
-    @property
-    def decode_metadata(self) -> Optional["AttentionMetadata"]:
-        return self
-
-    def asdict_zerocopy(self, skip_fields: Optional[Set[str]] = None) -> Dict[str, Any]:
-        """Similar to dataclasses.asdict, but avoids deepcopying."""
-        if skip_fields is None:
-            skip_fields = set()
-        # Note that if we add dataclasses as fields, they will need
-        # similar handling.
-        return {
-            field.name: getattr(self, field.name)
-            for field in fields(self)
-            if field.name not in skip_fields
-        }
-
-
-class Attention(nn.Module):
+class MiniMaxText01Attention(nn.Module):
 
     def __init__(
         self,
+        hidden_size: int,
         num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        cache_config: Any = None,
+        head_dim: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        max_position: int = 8192,
+        rope_theta: float = 10000,
+        sliding_window: Optional[int] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        per_layer_sliding_window: Optional[int] = None,
-        use_mla: bool = False,
-        prefix: str = "",
-        attn_type: str = "decoder",
-        kv_sharing_target_layer_name: Optional[str] = None,
-        **extra_impl_args,
+        layer_idx: int = None,
+        cache_config: Any = None,
+        prefix: str = "mha",
     ) -> None:
         super().__init__()
-        if per_layer_sliding_window is not None:
-            # per-layer sliding window
-            sliding_window = per_layer_sliding_window
-        elif cache_config is not None:
-            # model-level sliding window
-            sliding_window = cache_config.sliding_window
+        self.layer_idx = layer_idx
+        self.max_position = max_position
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
         else:
-            sliding_window = None
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim
 
-        if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
-            calculate_kv_scales = cache_config.calculate_kv_scales
-        else:
-            kv_cache_dtype = "auto"
-            calculate_kv_scales = False
-        if num_kv_heads is None:
-            num_kv_heads = num_heads
-        assert num_heads % num_kv_heads == 0, (
-            f"num_heads ({num_heads}) is not "
-            f"divisible by num_kv_heads ({num_kv_heads})"
-        )
-
-        self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
-        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
-
-        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
-
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-        self.use_mla = use_mla
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim ** -0.5
+        self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
-        quant_method = (
-            quant_config.get_quant_method(self, prefix=prefix) if quant_config else None
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
-        if quant_method is not None and not isinstance(
-            quant_method, UnquantizedLinearMethod
-        ):
-            assert isinstance(quant_method, BaseKVCacheMethod)
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position,
+            base=rope_theta,
+        )
 
+        self.attn = RadixAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            layer_id=layer_idx,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+        return
 
-@dataclass
-class ForwardContext:
-    """
-    Forward context for MiniMaxText01 model.
-    """
-
-    no_compile_layers: dict[str, Any]
-    attn_metadata: Union[AttentionMetadata, dict[str, AttentionMetadata]]
-    virtual_engine: int
-
-
-_forward_context: Optional[ForwardContext] = None
-
-
-def get_forward_context() -> ForwardContext:
-    """Get the current forward context."""
-    assert _forward_context is not None
-    return _forward_context
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        **kwargs
+    ) -> torch.Tensor:
+        # forward_context = get_forward_context()
+        # attn_metadata = forward_context.attn_metadata
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v, forward_batch)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MiniMaxText01LinearAttention(nn.Module):
@@ -497,7 +436,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             eps=1e-5,
         )
 
-        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(self.num_heads)
+        slope_rate = build_slope_tensor(self.num_heads)
         if num_hidden_layer <= 1:
             self.slope_rate = slope_rate * (1 + 1e-5)
         else:
@@ -514,94 +453,12 @@ class MiniMaxText01LinearAttention(nn.Module):
         param.data.copy_(loaded_weight)
         return
 
-    @staticmethod
-    def _build_slope_tensor(n_attention_heads: int):
-
-        def get_slopes(n):
-
-            def get_slopes_power_of_2(n):
-                start = 2 ** (-(2 ** -(math.log2(n) - 3)))
-                ratio = start
-                return [start * ratio ** i for i in range(n)]
-
-            if math.log2(n).is_integer():
-                return get_slopes_power_of_2(n)
-            else:
-                closest_power_of_2 = 2 ** math.floor(math.log2(n))
-                return (
-                    get_slopes_power_of_2(closest_power_of_2)
-                    + get_slopes(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
-                )
-
-        slopes = torch.tensor(
-            get_slopes(n_attention_heads), dtype=torch.float32
-        ).reshape(n_attention_heads, 1, 1)
-        return slopes
-
-    def _prefill_and_mix_infer(
-        self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
-    ):
-        hidden = []
-        for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
-            if _prefill_idx >= len(attn_metadata.query_start_loc):
-                break
-            if _prefill_idx >= len(state_indices_tensor):
-                break
-            _start = attn_metadata.query_start_loc[_prefill_idx]
-            _end = attn_metadata.query_start_loc[_prefill_idx + 1]
-            slot_id = state_indices_tensor[_prefill_idx]
-            qs = q[_start:_end].transpose(0, 1).contiguous()
-            ks = k[_start:_end].transpose(0, 1).contiguous()
-            vs = v[_start:_end].transpose(0, 1).contiguous()
-            slot_id = state_indices_tensor[_prefill_idx]
-            slice_layer_cache = kv_cache[slot_id, ...]
-
-            out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
-                qs,
-                ks,
-                vs,
-                slice_layer_cache,
-                self.tp_slope,
-                self.BLOCK,
-                layer_idx=self.layer_idx,
-            )
-            hidden.append(out_slice.contiguous())
-        if attn_metadata.num_decode_tokens > 0:
-            hidden.append(
-                self._decode_infer(
-                    q, k, v, kv_cache, state_indices_tensor, attn_metadata
-                )
-            )
-
-        if not hidden:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-
-        hidden = torch.concat(hidden, dim=0).contiguous()
-        return hidden
-
-    def _decode_infer(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kv_cache: torch.Tensor,
-        state_indices_tensor: torch.Tensor,
-        attn_metadata,
-    ) -> torch.Tensor:
-        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
-        hidden = linear_decode_forward_triton(
-            q, k, v, kv_cache, self.tp_slope, slot_id, 32
-        )
-        return hidden
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: MinimaxCacheParams,
+        attn_backend: LightningAttentionBackend,
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
@@ -609,18 +466,71 @@ class MiniMaxText01LinearAttention(nn.Module):
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        # forward_context = get_forward_context()
-        # attn_metadata = forward_context.attn_metadata
-        kv_cache = kv_caches.minimax_cache
-        state_indices_tensor = kv_caches.state_indices_tensor
 
-        decode_only = False  # getattr(attn_metadata, "num_prefills", 0) == 0
+        # Use the lightning attention backend
+        if attn_backend.forward_metadata is None:
+            # Create a proper forward batch for metadata initialization
+            class DummyForwardBatch:
+                def __init__(self):
+                    self.batch_size = q.shape[0]
+                    self.seq_lens = torch.ones(
+                        self.batch_size, dtype=torch.int32, device=q.device
+                    )
+                    self.forward_mode = None  # Will be treated as decode mode
+                    self.extend_seq_lens = None
+                    # Add missing attributes for the backend
+                    self.kv_caches = kv_caches.minimax_cache
+                    self.state_indices_tensor = kv_caches.state_indices_tensor
+
+            dummy_batch = DummyForwardBatch()
+            attn_backend.init_forward_metadata(dummy_batch)
+
+        # Get metadata and ensure proper field assignment
+        metadata = attn_backend.forward_metadata
+
+        # Create updated metadata with correct fields
+        updated_metadata = LightningAttentionMetadata(
+            num_prefills=getattr(metadata, "num_prefills", 0),
+            num_prefill_tokens=getattr(metadata, "num_prefill_tokens", 0),
+            num_decode_tokens=getattr(metadata, "num_decode_tokens", q.shape[0]),
+            query_start_loc=getattr(
+                metadata,
+                "query_start_loc",
+                torch.arange(0, q.shape[0] + 1, dtype=torch.int32, device=q.device),
+            ),
+            context_lens_tensor=getattr(
+                metadata,
+                "context_lens_tensor",
+                torch.ones(q.shape[0], dtype=torch.int32, device=q.device),
+            ),
+            rotary_emb=getattr(metadata, "rotary_emb", None),
+            kv_caches=kv_caches.minimax_cache,
+            state_indices_tensor=kv_caches.state_indices_tensor,
+            slope_rates=self.tp_slope,
+        )
+
+        # Update backend metadata
+        attn_backend.forward_metadata = updated_metadata
+
+        decode_only = updated_metadata.num_prefills == 0
         if not decode_only:
-            hidden = self._prefill_and_mix_infer(
-                q, k, v, kv_cache, state_indices_tensor
+            hidden = attn_backend._prefill_and_mix_infer(
+                q,
+                k,
+                v,
+                updated_metadata.kv_caches,
+                updated_metadata.state_indices_tensor,
+                updated_metadata,
             )
         else:
-            hidden = self._decode_infer(q, k, v, kv_cache, state_indices_tensor)
+            hidden = attn_backend._decode_infer(
+                q,
+                k,
+                v,
+                updated_metadata.kv_caches,
+                updated_metadata.state_indices_tensor,
+                updated_metadata,
+            )
 
         hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states)
@@ -628,85 +538,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         hidden = hidden.to(hidden_states.dtype)
         hidden, _ = self.out_proj(hidden)
         return hidden
-
-
-class MiniMaxText01Attention(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        head_dim: int,
-        num_kv_heads: int,
-        rotary_dim: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        sliding_window: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_idx: int = None,
-        cache_config: Any = None,
-        prefix: str = "mha",
-    ) -> None:
-        super().__init__()
-        self.layer_idx = layer_idx
-
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = head_dim
-
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
-        self.rope_theta = rope_theta
-        self.sliding_window = sliding_window
-
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
-        return
-
-    def forward(
-        self, hidden_states: torch.Tensor, positions: torch.Tensor, **kwargs
-    ) -> torch.Tensor:
-        # forward_context = get_forward_context()
-        # attn_metadata = forward_context.attn_metadata
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
 
 
 class MiniMaxText01DecoderLayer(nn.Module):
@@ -733,11 +564,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
         head_dim = getattr(config, "head_dim", None)
         if head_dim is None:
             head_dim = config.hidden_size // config.num_attention_heads
-        max_position_embeddings = 0
+        max_position_embeddings = config.max_position_embeddings
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
-            max_position_embeddings = min(
-                config.max_position_embeddings, config.max_model_len
-            )
+            max_position_embeddings = min(max_position_embeddings, config.max_model_len)
         if config.attention_type == 0:
             use_headxdim = True
             hidden_inner = (
@@ -854,23 +683,32 @@ class MiniMaxText01DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: Union[list[dict], Optional[torch.Tensor]],
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
+        forward_batch: ForwardBatch,
+        attn_metadata: LightningAttentionMetadata = None,
+        residual: Optional[torch.Tensor] = None,
         is_warmup: bool = False,
+        attn_backend: Optional[LightningAttentionBackend] = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        # forward_context = get_forward_context()
-        # attn_metadata = forward_context.attn_metadata
         layernorm_input = hidden_states
         layernorm_output = self.input_layernorm(layernorm_input)
         residual = layernorm_output if self.postnorm else layernorm_input
-        self_attention_output = self.self_attn(
-            hidden_states=layernorm_output,
-            positions=positions,
-            kv_caches=kv_caches,
-            # attn_metadata=attn_metadata,
-        )
+        if isinstance(self.self_attn, MiniMaxText01LinearAttention):
+            self_attention_output = self.self_attn(
+                hidden_states=layernorm_output,
+                positions=positions,
+                kv_caches=kv_caches,
+                attn_backend=attn_backend,
+            )
+        else:
+            self_attention_output = self.self_attn(
+                hidden_states=layernorm_output,
+                positions=positions,
+                forward_batch=forward_batch,
+                attn_metadata=attn_metadata,
+                **kwargs,
+            )
 
         residual = residual * self.layernorm_attention_alpha
         self_attention_output = self_attention_output * self.layernorm_attention_beta
@@ -1074,6 +912,9 @@ class MiniMaxText01Model(nn.Module):
             dtype=torch.float32, cache_shape=self.cache_shape
         )
 
+        # Initialize lightning attention backend with proper configuration
+        self.attn_backend = self._initialize_attention_backend(config, scheduler_config)
+
         rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim", None)
         if head_dim is None:
@@ -1101,6 +942,40 @@ class MiniMaxText01Model(nn.Module):
             self.norm = PPMissingLayer()
         self.embed_scale = 1.0
         return
+
+    def _initialize_attention_backend(self, config, scheduler_config):
+        """Initialize the lightning attention backend with proper configuration."""
+
+        # Create a proper model runner stub for the backend
+        class ModelRunnerStub:
+            def __init__(self, device, config):
+                self.device = device
+                self.config = config
+
+        # Use the actual device from the model (fallback to CPU if not available)
+        device = (
+            next(self.parameters()).device
+            if list(self.parameters())
+            else torch.device("cpu")
+        )
+        model_runner_stub = ModelRunnerStub(device, config)
+
+        # Calculate proper head_dim
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
+
+        # Get proper max_context_len
+        max_context_len = config.max_position_embeddings
+        if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
+            max_context_len = min(config.max_position_embeddings, config.max_model_len)
+
+        return LightningAttentionBackend(
+            model_runner=model_runner_stub,
+            num_heads=config.num_attention_heads,
+            head_dim=head_dim,
+            max_context_len=max_context_len,
+        )
 
     def _clear_prefill_cache(
         self, attn_metadata, minimax_cache_tensors: torch.Tensor, **kwargs
@@ -1140,12 +1015,32 @@ class MiniMaxText01Model(nn.Module):
         forward_batch: ForwardBatch,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        attn_backend: Optional[LightningAttentionBackend] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # forward_context = get_forward_context()
-        # attn_metadata = forward_context.attn_metadata
-        # if attn_metadata is None:
-        #     return None
+
+        if attn_backend is None:
+            attn_backend = self.attn_backend
+
+        # Auto-initialize AttentionMetadata if not provided
+        batch_size = (
+            input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
+        )
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+
+        attn_metadata = LightningAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=batch_size,
+            query_start_loc=torch.arange(
+                0, batch_size + 1, dtype=torch.int32, device=device
+            ),
+            context_lens_tensor=torch.ones(
+                batch_size, dtype=torch.int32, device=device
+            ),
+            rotary_emb=self.rotary_emb,
+        )
+
         if "request_ids_to_seq_ids" not in kwargs:
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
@@ -1155,8 +1050,8 @@ class MiniMaxText01Model(nn.Module):
             minimax_cache_tensors,
             state_indices_tensor,
         ) = self.minimax_cache.current_run_tensors(**kwargs)
-        # if getattr(attn_metadata, "num_prefills", 0) > 0:
-        #     self._clear_prefill_cache(attn_metadata, minimax_cache_tensors, **kwargs)
+        if getattr(attn_metadata, "num_prefills", 0) > 0:
+            self._clear_prefill_cache(attn_metadata, minimax_cache_tensors, **kwargs)
 
         minimax_cache_params = MinimaxCacheParams(
             minimax_cache_tensors, state_indices_tensor
@@ -1173,8 +1068,6 @@ class MiniMaxText01Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         minimax_cache_index = 0
-        # attn_metadata.rotary_emb = self.rotary_emb
-        # for i in range(self.start_layer, self.end_layer):
         for i in range(len(self.layers)):
             layer = self.layers[i]
             _caches = None
@@ -1186,7 +1079,10 @@ class MiniMaxText01Model(nn.Module):
                 hidden_states=hidden_states,
                 positions=positions,
                 kv_caches=_caches,
+                forward_batch=forward_batch,
+                attn_metadata=attn_metadata,
                 residual=residual,
+                attn_backend=attn_backend,
             )
         if not self.pp_group.is_last_rank:
             return IntermediateTensors(
@@ -1345,24 +1241,24 @@ class MiniMaxText01ForCausalLM(nn.Module):
                 ]
             else:
                 expert_params_mapping = [
-                    (
-                        "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
-                        f"{expert_id}.{weight_name}.weight_scale",
-                        expert_id,
-                        weight_name,
-                    )
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ] + [
-                    (
-                        "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-                        f"{expert_id}.{weight_name}.weight",
-                        expert_id,
-                        weight_name,
-                    )
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
+                                            (
+                                                "w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+                                                f"{expert_id}.{weight_name}.weight_scale",
+                                                expert_id,
+                                                weight_name,
+                                            )
+                                            for expert_id in range(self.config.num_local_experts)
+                                            for weight_name in ["w1", "w2", "w3"]
+                                        ] + [
+                                            (
+                                                "w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                                                f"{expert_id}.{weight_name}.weight",
+                                                expert_id,
+                                                weight_name,
+                                            )
+                                            for expert_id in range(self.config.num_local_experts)
+                                            for weight_name in ["w1", "w2", "w3"]
+                                        ]
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
                 name_expert_id = get_expert_id(name)
                 if name_expert_id is not None and int(name_expert_id) != int(expert_id):
