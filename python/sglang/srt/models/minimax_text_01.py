@@ -53,6 +53,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.mem_cache.constant_size_cache import ConstantSizeCache
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.utils import make_layers
+from test.srt.cpu.test_qkv_proj_with_rope import hidden_size
 
 
 def replace_weight_name(
@@ -1106,6 +1107,7 @@ class MiniMaxText01ForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.pp_group = get_pp_group()
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
@@ -1125,11 +1127,6 @@ class MiniMaxText01ForCausalLM(nn.Module):
                 org_num_embeddings=self.config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             )
-
-            self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size
-            )
-
         else:
             self.lm_head = PPMissingLayer()
         self.lm_head.float()
@@ -1137,6 +1134,7 @@ class MiniMaxText01ForCausalLM(nn.Module):
             1 for attn_type in self.config.attn_type_list if attn_type == 1
         )
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
+        self.logits_processor = LogitsProcessor(config)
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
@@ -1171,7 +1169,7 @@ class MiniMaxText01ForCausalLM(nn.Module):
             **kwargs,
         )
 
-        return hidden_states
+        return self.logits_processor(input_ids, hidden_states, self.lm_head, forward_batch)
 
     def compute_logits(
         self, hidden_states: torch.Tensor, sampling_metadata
