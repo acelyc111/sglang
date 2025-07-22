@@ -46,7 +46,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.mem_cache.radix_cache import RadixCache
+from sglang.srt.mem_cache.constant_size_cache import ConstantSizeCache
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.utils import make_layers
 
@@ -297,7 +297,7 @@ class MinimaxCacheParams:
         )
 
 
-class MinimaxCacheManager(RadixCache):
+class MinimaxCacheManager(ConstantSizeCache):
 
     def __init__(self, dtype, cache_shape):
         super().__init__(None, None, cache_shape[1])  # max_batch_size is cache_shape[1]
@@ -506,8 +506,8 @@ class MiniMaxText01LinearAttention(nn.Module):
                 1 - layer_idx / (num_hidden_layer - 1) + 1e-5
             )
         self.tp_slope = self.slope_rate[
-            self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
-        ].contiguous()
+                        self.tp_rank * self.tp_heads: (self.tp_rank + 1) * self.tp_heads
+                        ].contiguous()
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -523,7 +523,7 @@ class MiniMaxText01LinearAttention(nn.Module):
             def get_slopes_power_of_2(n):
                 start = 2 ** (-(2 ** -(math.log2(n) - 3)))
                 ratio = start
-                return [start * ratio**i for i in range(n)]
+                return [start * ratio ** i for i in range(n)]
 
             if math.log2(n).is_integer():
                 return get_slopes_power_of_2(n)
@@ -589,10 +589,10 @@ class MiniMaxText01LinearAttention(nn.Module):
         state_indices_tensor: torch.Tensor,
         attn_metadata,
     ) -> torch.Tensor:
-        q = q[attn_metadata.num_prefill_tokens :].unsqueeze(2).contiguous()
-        k = k[attn_metadata.num_prefill_tokens :].unsqueeze(2).contiguous()
-        v = v[attn_metadata.num_prefill_tokens :].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0) :]
+        q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
+        slot_id = state_indices_tensor[getattr(attn_metadata, "num_prefills", 0):]
         hidden = linear_decode_forward_triton(
             q, k, v, kv_cache, self.tp_slope, slot_id, 32
         )
