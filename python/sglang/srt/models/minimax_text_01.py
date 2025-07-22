@@ -53,8 +53,6 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.mem_cache.constant_size_cache import ConstantSizeCache
 from sglang.srt.models.transformers import maybe_prefix
 from sglang.srt.utils import make_layers
-from test.srt.cpu.test_qkv_proj_with_rope import hidden_size
-
 
 def replace_weight_name(
     name: str,
