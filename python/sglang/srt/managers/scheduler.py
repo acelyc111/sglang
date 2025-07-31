@@ -1067,6 +1067,7 @@ class Scheduler(
                 bootstrap_room=recv_req.bootstrap_room,
                 data_parallel_rank=recv_req.data_parallel_rank,
                 vocab_size=self.model_config.vocab_size,
+                metrics_collector=self.metrics_collector,
             )
             req.tokenizer = self.tokenizer
 
@@ -1349,6 +1350,20 @@ class Scheduler(
             self.stats.gen_throughput = 0
             self.stats.num_queue_reqs = len(self.waiting_queue)
             self.stats.num_grammar_queue_reqs = len(self.grammar_queue)
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                self.stats.num_prefill_bootstrap_queue_reqs = len(
+                    self.disagg_prefill_bootstrap_queue.queue
+                )
+                self.stats.num_prefill_infight_queue_reqs = len(
+                    self.disagg_prefill_inflight_queue
+                )
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                self.stats.num_decode_prealloc_queue_reqs = len(
+                    self.disagg_decode_prealloc_queue.queue
+                )
+                self.stats.num_decode_transfer_queue_reqs = len(
+                    self.disagg_decode_transfer_queue.queue
+                )
             self.metrics_collector.log_stats(self.stats)
         self._publish_kv_events()
 
@@ -1549,6 +1564,7 @@ class Scheduler(
             # only record queue time when enable_metrics is True to avoid overhead
             for req in can_run_list:
                 req.queue_time_end = time.perf_counter()
+                req.add_latency("prefill_waiting")
 
         self.waiting_queue = [
             x for x in self.waiting_queue if x not in set(can_run_list)
