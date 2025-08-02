@@ -45,6 +45,7 @@ from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 
 from sglang.srt.disaggregation.utils import (
     FAKE_BOOTSTRAP_HOST,
+    DisaggregationMode,
     register_disaggregation_server,
 )
 from sglang.srt.entrypoints.engine import _launch_subprocesses
@@ -248,12 +249,24 @@ async def health_generate(request: Request) -> Response:
     if _global_state.tokenizer_manager.is_image_gen:
         raise NotImplementedError()
     elif _global_state.tokenizer_manager.is_generation:
-        gri = GenerateReqInput(
-            rid=rid,
-            input_ids=[0],
-            sampling_params=sampling_params,
-            log_metrics=False,
-        )
+        server_args = _global_state.tokenizer_manager.server_args
+        if server_args.disaggregation_mode == DisaggregationMode.NULL:
+            gri = GenerateReqInput(
+                rid=rid,
+                input_ids=[0],
+                sampling_params=sampling_params,
+                log_metrics=False,
+            )
+        else:
+            gri = GenerateReqInput(
+                rid=rid,
+                input_ids=[0],
+                sampling_params=sampling_params,
+                log_metrics=False,
+                # Similar to warmup request, we use a hack in health_generate.
+                bootstrap_host=FAKE_BOOTSTRAP_HOST,
+                bootstrap_room=server_args.node_rank,
+            )
     else:
         gri = EmbeddingReqInput(
             rid=rid, input_ids=[0], sampling_params=sampling_params, log_metrics=False
@@ -1033,7 +1046,7 @@ def _execute_server_warmup(
             )
             assert res.status_code == 200, f"{res}"
         else:
-            logger.info(f"Start of prefill warmup ...")
+            logger.info(f"Start of warmup ...")
             json_data = {
                 "sampling_params": {
                     "temperature": 0.0,
@@ -1041,8 +1054,8 @@ def _execute_server_warmup(
                     "ignore_eos": True,
                 },
                 "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
-                # This is a hack to ensure fake transfer is enabled during prefill warmup
-                # ensure each dp rank has a unique bootstrap_room during prefill warmup
+                # This is a hack to ensure fake transfer is enabled during warmup
+                # ensure each dp rank has a unique bootstrap_room during warmup
                 "bootstrap_room": [
                     i * (2**63 // server_args.dp_size) + (i % server_args.tp_size)
                     for i in range(server_args.dp_size)
@@ -1056,7 +1069,7 @@ def _execute_server_warmup(
                 timeout=1800,  # because of deep gemm precache is very long if not precache.
             )
             logger.info(
-                f"End of prefill warmup with status {res.status_code}, resp: {res.json()}"
+                f"End of warmup with status {res.status_code}, resp: {res.json()}"
             )
 
     except Exception:
