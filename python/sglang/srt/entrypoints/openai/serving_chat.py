@@ -123,6 +123,12 @@ class OpenAIServingChat(OpenAIServingBase):
             else:
                 prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
 
+        customer_labels = (
+            json.loads(raw_request.headers.get("x-customer-labels"))
+            if raw_request and raw_request.headers.get("x-customer-labels")
+            else None
+        )
+
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
             image_data=processed_messages.image_data,
@@ -141,7 +147,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
-            customer_labels=raw_request.headers.get("x-customer-labels"),
+            customer_labels=customer_labels,
         )
         logger.info(f"{raw_request=}")
         logger.info(f"{adapted_request.customer_labels=}")
