@@ -56,6 +56,7 @@ class SchedulerMetricsMixin:
                 "engine_type": engine_type,
                 "tp_rank": tp_rank,
                 "pp_rank": pp_rank,
+                "customer": "",  # TODO(yingchun): configure customer name
             }
             if dp_rank is not None:
                 labels["dp_rank"] = dp_rank
