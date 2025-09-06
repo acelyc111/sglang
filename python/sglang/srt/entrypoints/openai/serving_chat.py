@@ -141,7 +141,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
-            customer_labels=raw_request.headers().get("x-customer-labels"),
+            customer_labels=raw_request.headers.get("x-customer-labels"),
         )
         logger.info(f"{raw_request=}")
         logger.info(f"{adapted_request.customer_labels=}")
