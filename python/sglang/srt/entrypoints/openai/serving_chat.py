@@ -143,6 +143,7 @@ class OpenAIServingChat(OpenAIServingBase):
             rid=request.rid,
             customer_labels=raw_request.headers().get("x-customer-labels"),
         )
+        logger.info(f"{adapted_request.customer_labels=}")
 
         return adapted_request, request
 

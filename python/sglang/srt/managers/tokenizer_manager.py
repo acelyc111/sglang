@@ -1867,6 +1867,8 @@ class TokenizerManager:
             if isinstance(state.obj, GenerateReqInput) and state.obj.customer_labels
             else None
         )
+        logger.info(f"{state.obj.customer_labels=}")
+        logger.info(f"{customer_labels=}")
         if (
             state.first_token_time == 0.0
             and self.disaggregation_mode != DisaggregationMode.PREFILL
