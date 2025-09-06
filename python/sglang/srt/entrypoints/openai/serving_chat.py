@@ -91,6 +91,7 @@ class OpenAIServingChat(OpenAIServingBase):
     def _convert_to_internal_request(
         self,
         request: ChatCompletionRequest,
+        raw_request: Request = None,
     ) -> tuple[GenerateReqInput, ChatCompletionRequest]:
         reasoning_effort = (
             request.chat_template_kwargs.pop("reasoning_effort", None)
@@ -122,6 +123,22 @@ class OpenAIServingChat(OpenAIServingBase):
             else:
                 prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
 
+        customer_labels = None
+        if self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels:
+            customer_labels = (
+                json.loads(raw_request.headers.get("x-customer-labels"))
+                if raw_request and raw_request.headers.get("x-customer-labels")
+                else None
+            )
+            allowed_labels = set(
+                self.tokenizer_manager.server_args.tokenizer_metrics_custom_labels
+            )
+            customer_labels = {
+                label: value
+                for label, value in customer_labels.items()
+                if label in allowed_labels
+            }
+
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
             image_data=processed_messages.image_data,
@@ -140,6 +157,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
+            customer_labels=customer_labels,
         )
 
         return adapted_request, request

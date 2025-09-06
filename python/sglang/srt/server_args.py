@@ -191,6 +191,7 @@ class ServerArgs:
     show_time_cost: bool = False
     enable_metrics: bool = False
     enable_metrics_for_all_schedulers: bool = False
+    tokenizer_metrics_custom_labels: Optional[List[str]] = None
     bucket_time_to_first_token: Optional[List[float]] = None
     bucket_inter_token_latency: Optional[List[float]] = None
     bucket_e2e_request_latency: Optional[List[float]] = None
@@ -1209,6 +1210,15 @@ class ServerArgs:
             help="Enable --enable-metrics-for-all-schedulers when you want schedulers on all TP ranks (not just TP 0) "
             "to record request metrics separately. This is especially useful when dp_attention is enabled, as "
             "otherwise all metrics appear to come from TP 0.",
+        )
+        parser.add_argument(
+            "--tokenizer-metrics-custom-labels",
+            type=str,
+            nargs="+",
+            default=ServerArgs.tokenizer_metrics_custom_labels,
+            help="The customer labels allowed for tokenizer metrics. The labels are specified via a dict in "
+            "'x-customer-labels' field in HTTP requests, e.g., {'label1': 'value1', 'label2': 'value2'} is "
+            "allowed if '--tokenizer-metrics-custom-labels label1 label2' is set.",
         )
         parser.add_argument(
             "--bucket-time-to-first-token",
