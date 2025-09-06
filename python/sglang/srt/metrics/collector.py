@@ -12,7 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 """Utilities for Prometheus Metrics Collection."""
-
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +21,8 @@ from typing import Dict, List, Optional, Union
 from sglang.srt.metrics.utils import generate_buckets
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_bool_env_var
+
+logger = logging.getLogger(__name__)
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 
@@ -547,6 +549,7 @@ class TokenizerMetricsCollector:
         self, customer_labels: Dict[str, str], value: float
     ):
         labels = {**self.labels, **customer_labels} if customer_labels else self.labels
+        logger.info(f"{labels=}")
         self.histogram_time_to_first_token.labels(**labels).observe(value)
 
     def observe_inter_token_latency(
