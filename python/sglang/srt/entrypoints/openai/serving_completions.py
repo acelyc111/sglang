@@ -55,6 +55,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
     def _convert_to_internal_request(
         self,
         request: CompletionRequest,
+        raw_request: Request = None,
     ) -> tuple[GenerateReqInput, CompletionRequest]:
         """Convert OpenAI completion request to internal format"""
         # NOTE: with openai API, the prompt's logprobs are always not computed
