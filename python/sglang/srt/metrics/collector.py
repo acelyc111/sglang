@@ -12,7 +12,7 @@
 # limitations under the License.
 # ==============================================================================
 """Utilities for Prometheus Metrics Collection."""
-
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +21,8 @@ from typing import Dict, List, Optional, Union
 from sglang.srt.metrics.utils import generate_buckets
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_bool_env_var
+
+logger = logging.getLogger(__name__)
 
 SGLANG_TEST_REQUEST_TIME_STATS = get_bool_env_var("SGLANG_TEST_REQUEST_TIME_STATS")
 
@@ -523,33 +525,42 @@ class TokenizerMetricsCollector:
 
     def observe_one_finished_request(
         self,
+        customer_labels: Dict[str, str],
         prompt_tokens: int,
         generation_tokens: int,
         cached_tokens: int,
         e2e_latency: float,
         has_grammar: bool,
     ):
-        self.prompt_tokens_total.labels(**self.labels).inc(prompt_tokens)
-        self.generation_tokens_total.labels(**self.labels).inc(generation_tokens)
+        labels = {**self.labels, **customer_labels} if customer_labels else self.labels
+        self.prompt_tokens_total.labels(**labels).inc(prompt_tokens)
+        self.generation_tokens_total.labels(**labels).inc(generation_tokens)
         if cached_tokens > 0:
-            self.cached_tokens_total.labels(**self.labels).inc(cached_tokens)
-        self.num_requests_total.labels(**self.labels).inc(1)
+            self.cached_tokens_total.labels(**labels).inc(cached_tokens)
+        self.num_requests_total.labels(**labels).inc(1)
         if has_grammar:
-            self.num_so_requests_total.labels(**self.labels).inc(1)
+            self.num_so_requests_total.labels(**labels).inc(1)
         self._log_histogram(self.histogram_e2e_request_latency, e2e_latency)
         if self.collect_tokens_histogram:
             self._log_histogram(self.prompt_tokens_histogram, prompt_tokens)
             self._log_histogram(self.generation_tokens_histogram, generation_tokens)
 
-    def observe_time_to_first_token(self, value: float):
-        self.histogram_time_to_first_token.labels(**self.labels).observe(value)
+    def observe_time_to_first_token(
+        self, customer_labels: Dict[str, str], value: float
+    ):
+        labels = {**self.labels, **customer_labels} if customer_labels else self.labels
+        logger.info(f"{labels=}")
+        self.histogram_time_to_first_token.labels(**labels).observe(value)
 
-    def observe_inter_token_latency(self, internval: float, num_new_tokens: int):
+    def observe_inter_token_latency(
+        self, customer_labels: Dict[str, str], internval: float, num_new_tokens: int
+    ):
+        labels = {**self.labels, **customer_labels} if customer_labels else self.labels
         adjusted_interval = internval / num_new_tokens
 
         # A faster version of the Histogram::observe which observes multiple values at the same time.
         # reference: https://github.com/prometheus/client_python/blob/v0.21.1/prometheus_client/metrics.py#L639
-        his = self.histogram_inter_token_latency_seconds.labels(**self.labels)
+        his = self.histogram_inter_token_latency_seconds.labels(**labels)
         his._sum.inc(internval)
 
         for i, bound in enumerate(his._upper_bounds):
@@ -557,6 +568,7 @@ class TokenizerMetricsCollector:
                 his._buckets[i].inc(num_new_tokens)
                 break
 
+    # TODO(yingchun): these metrics need the customer labels as well?
     def observe_one_aborted_request(self):
         self.num_aborted_requests_total.labels(**self.labels).inc(1)
 

@@ -1033,7 +1033,6 @@ class TokenizerManager:
             return
         req = AbortReq(rid, abort_all)
         self.send_to_scheduler.send_pyobj(req)
-
         if self.enable_metrics:
             self.metrics_collector.observe_one_aborted_request()
 
@@ -1863,6 +1862,13 @@ class TokenizerManager:
             else 0
         )
 
+        customer_labels = (
+            state.obj.customer_labels
+            if isinstance(state.obj, GenerateReqInput) and state.obj.customer_labels
+            else None
+        )
+        logger.info(f"{state.obj.customer_labels=}")
+        logger.info(f"{customer_labels=}")
         if (
             state.first_token_time == 0.0
             and self.disaggregation_mode != DisaggregationMode.PREFILL
@@ -1870,7 +1876,7 @@ class TokenizerManager:
             state.first_token_time = state.last_time = time.time()
             state.last_completion_tokens = completion_tokens
             self.metrics_collector.observe_time_to_first_token(
-                state.first_token_time - state.created_time
+                customer_labels, state.first_token_time - state.created_time
             )
         else:
             num_new_tokens = completion_tokens - state.last_completion_tokens
@@ -1878,6 +1884,7 @@ class TokenizerManager:
                 new_time = time.time()
                 interval = new_time - state.last_time
                 self.metrics_collector.observe_inter_token_latency(
+                    customer_labels,
                     interval,
                     num_new_tokens,
                 )
@@ -1892,6 +1899,7 @@ class TokenizerManager:
                 or state.obj.sampling_params.get("structural_tag", None)
             )
             self.metrics_collector.observe_one_finished_request(
+                customer_labels,
                 recv_obj.prompt_tokens[i],
                 completion_tokens,
                 recv_obj.cached_tokens[i],
