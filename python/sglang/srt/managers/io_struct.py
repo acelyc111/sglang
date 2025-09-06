@@ -129,7 +129,7 @@ class GenerateReqInput:
     background: bool = False
 
     # For customer metric labels
-    custom_labels: Optional[Dict[str, str]] = None
+    customer_labels: Optional[Dict[str, str]] = None
 
     def contains_mm_input(self) -> bool:
         return (

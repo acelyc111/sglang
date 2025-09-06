@@ -8,9 +8,6 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from fastapi import Request
 from fastapi.responses import ORJSONResponse, StreamingResponse
 
-from python.sglang.srt.distributed.device_communicators.custom_all_reduce import (
-    custom_ar,
-)
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -144,7 +141,7 @@ class OpenAIServingChat(OpenAIServingBase):
             bootstrap_room=request.bootstrap_room,
             return_hidden_states=request.return_hidden_states,
             rid=request.rid,
-            custom_labels=raw_request.headers().get("x-custom-labels"),
+            customer_labels=raw_request.headers().get("x-custom-labels"),
         )
 
         return adapted_request, request
