@@ -1866,11 +1866,7 @@ class TokenizerManager:
             else 0
         )
 
-        customer_labels = (
-            state.obj.customer_labels
-            if isinstance(state.obj, GenerateReqInput) and state.obj.customer_labels
-            else None
-        )
+        customer_labels = getattr(state.obj, "customer_labels", None)
         labels = (
             {**self.metrics_collector.labels, **customer_labels}
             if customer_labels
