@@ -725,7 +725,7 @@ def fastsafetensors_weights_iterator(
         disable=not enable_tqdm,
         bar_format=_BAR_FORMAT,
     ):
-        loader = SafeTensorsFileLoader(pg, device)
+        loader = SafeTensorsFileLoader(pg, device, nogds=False)
         rank_file_map = {i: [f] for i, f in enumerate(st_file)}
         logger.info(f"Loading {len(rank_file_map)} tensors from {st_file}")
         logger.info(f"Loading {rank_file_map=}")
