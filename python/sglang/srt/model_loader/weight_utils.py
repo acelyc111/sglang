@@ -714,14 +714,14 @@ def fastsafetensors_weights_iterator(
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
 
-    for f_list in tqdm(
-            hf_weights_files,
-            desc="Fastsafetensor loading shards",
-            disable=not enable_tqdm,
-            bar_format=_BAR_FORMAT,
+    for st_file in tqdm(
+        hf_weights_files,
+        desc="Fastsafetensor loading shards",
+        disable=not enable_tqdm,
+        bar_format=_BAR_FORMAT,
     ):
-        loader = SafeTensorsFileLoader(pg, device)
-        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+        loader = SafeTensorsFileLoader(pg, device, nogds=True)
+        rank_file_map = {i: [f] for i, f in enumerate(st_file)}
         loader.add_filenames(rank_file_map)
         try:
             fb = loader.copy_files_to_device()

@@ -80,6 +80,7 @@ DEFAULT_GPU_MEMORY_FRACTION_FOR_CALIBRATION = (
 from sglang.srt.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
+    fastsafetensors_weights_iterator,
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
     get_gguf_extra_tensor_names,
@@ -440,22 +441,27 @@ class DefaultModelLoader(BaseModelLoader):
                 hf_weights_files,
             )
         elif use_safetensors:
-            weight_loader_disable_mmap = (
-                get_global_server_args().weight_loader_disable_mmap
-            )
-
-            if extra_config.get("enable_multithread_load"):
-                weights_iterator = multi_thread_safetensors_weights_iterator(
-                    hf_weights_files,
-                    max_workers=extra_config.get(
-                        "num_threads", self.DEFAULT_NUM_THREADS
-                    ),
-                    disable_mmap=weight_loader_disable_mmap,
+            if True:
+                weights_iterator = fastsafetensors_weights_iterator(
+                    hf_weights_files
                 )
             else:
-                weights_iterator = safetensors_weights_iterator(
-                    hf_weights_files, disable_mmap=weight_loader_disable_mmap
+                weight_loader_disable_mmap = (
+                    get_global_server_args().weight_loader_disable_mmap
                 )
+
+                if extra_config.get("enable_multithread_load"):
+                    weights_iterator = multi_thread_safetensors_weights_iterator(
+                        hf_weights_files,
+                        max_workers=extra_config.get(
+                            "num_threads", self.DEFAULT_NUM_THREADS
+                        ),
+                        disable_mmap=weight_loader_disable_mmap,
+                    )
+                else:
+                    weights_iterator = safetensors_weights_iterator(
+                        hf_weights_files, disable_mmap=weight_loader_disable_mmap
+                    )
 
         else:
             if extra_config.get("enable_multithread_load"):
