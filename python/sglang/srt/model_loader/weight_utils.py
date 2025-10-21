@@ -714,6 +714,7 @@ def fastsafetensors_weights_iterator(
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
 
+    logger.info(f"Loading {hf_weights_files=}")
     for st_file in tqdm(
         hf_weights_files,
         desc="Fastsafetensor loading shards",
