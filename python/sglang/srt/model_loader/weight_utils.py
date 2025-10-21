@@ -722,6 +722,8 @@ def fastsafetensors_weights_iterator(
     ):
         loader = SafeTensorsFileLoader(pg, device, nogds=True)
         rank_file_map = {i: [f] for i, f in enumerate(st_file)}
+        logger.info(f"Loading {len(rank_file_map)} tensors from {st_file}")
+        logger.info(f"Loading {rank_file_map=}")
         loader.add_filenames(rank_file_map)
         try:
             fb = loader.copy_files_to_device()
