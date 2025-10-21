@@ -709,6 +709,10 @@ def fastsafetensors_weights_iterator(
         pg = SingleGroup()
 
     device = torch.device(f'cuda:{pg.rank()}')
+    weight_files_sub_lists = [
+        hf_weights_files[i:i + pg.size()]
+        for i in range(0, len(hf_weights_files), pg.size())
+    ]
 
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
@@ -716,12 +720,12 @@ def fastsafetensors_weights_iterator(
 
     logger.info(f"Loading {hf_weights_files=}")
     for st_file in tqdm(
-        hf_weights_files,
+        weight_files_sub_lists,
         desc="Fastsafetensor loading shards",
         disable=not enable_tqdm,
         bar_format=_BAR_FORMAT,
     ):
-        loader = SafeTensorsFileLoader(pg, device, nogds=True)
+        loader = SafeTensorsFileLoader(pg, device)
         rank_file_map = {i: [f] for i, f in enumerate(st_file)}
         logger.info(f"Loading {len(rank_file_map)} tensors from {st_file}")
         logger.info(f"Loading {rank_file_map=}")
