@@ -303,6 +303,12 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rustc --version && cargo --version
 
+# Configure cargo to use a mirror for faster downloads
+ENV RUSTUP_UPDATE_ROOT=https://mirrors.aliyun.com/rustup/rustup
+ENV RUSTUP_DIST_SERVER=https://mirrors.aliyun.com/rustup
+
+RUN echo "${RUSTUP_UPDATE_ROOT} ===== ${RUSTUP_DIST_SERVER}"
+
 # Build and install sgl-router
 RUN python3 -m pip install --no-cache-dir setuptools-rust \
     && cd /sgl-workspace/sglang/sgl-router \
