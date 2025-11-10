@@ -45,7 +45,6 @@ BUILD_ARGS=()
 [ -n "${ENABLE_BUILD_PROFILE:-}" ] && BUILD_ARGS+=(--build-arg ENABLE_BUILD_PROFILE="${ENABLE_BUILD_PROFILE}")
 
 docker buildx build \
-  -v $(pwd):/sgl-kernel \
   -f sgl-kernel/Dockerfile sgl-kernel \
   --build-arg BASE_IMG="${BASE_IMG}" \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
