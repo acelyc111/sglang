@@ -22,6 +22,14 @@ CACHE_DIR="${HOME}/.cache/sgl-kernel"
 BUILDX_CACHE_DIR="${CACHE_DIR}/buildx"
 mkdir -p "${BUILDX_CACHE_DIR}"
 
+# Ensure a buildx builder with docker-container driver (required for cache export)
+BUILDER_NAME="sgl-kernel-builder"
+if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
+  docker buildx create --name "${BUILDER_NAME}" --driver docker-container --use --bootstrap
+else
+  docker buildx use "${BUILDER_NAME}"
+fi
+
 PY_TAG="cp${PYTHON_VERSION//.}-cp${PYTHON_VERSION//.}"
 
 # Output directory for wheels
@@ -37,6 +45,7 @@ echo "BASE_IMG:       ${BASE_IMG}"
 echo "PYTHON_TAG:     ${PY_TAG}"
 echo "Output:         ${DIST_DIR}/"
 echo "Buildx cache:   ${BUILDX_CACHE_DIR}"
+echo "Builder:        ${BUILDER_NAME}"
 echo "----------------------------------------"
 
 # Optional profiling build-args (empty string disables)
@@ -45,6 +54,7 @@ BUILD_ARGS=()
 [ -n "${ENABLE_BUILD_PROFILE:-}" ] && BUILD_ARGS+=(--build-arg ENABLE_BUILD_PROFILE="${ENABLE_BUILD_PROFILE}")
 
 docker buildx build \
+  --builder "${BUILDER_NAME}" \
   -f sgl-kernel/Dockerfile sgl-kernel \
   --build-arg BASE_IMG="${BASE_IMG}" \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \

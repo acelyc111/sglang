@@ -23,7 +23,7 @@ ENV C_INCLUDE_PATH=/usr/local/cuda/include/cccl${C_INCLUDE_PATH:+:${C_INCLUDE_PA
 
 # System dependencies
 RUN yum install gcc gcc-c++ make wget tar numactl-devel libibverbs -y --nogpgcheck \
- && ln -sv /usr/lib64/libibverbs.so.1 /usr/lib64/libibverbs.so \
+ && ln -sv /usr/lib64/libibverbs.so.1 /usr/lib64/libibverbs.so || true \
  && yum clean all && rm -rf /var/cache/yum
 
 # Install CMake (cached download)
@@ -35,7 +35,7 @@ RUN --mount=type=cache,id=sgl-kernel-cmake,target=/cmake-downloads \
       echo "Using cached CMake from /cmake-downloads/${CMAKE_TARBALL}"; \
       cp /cmake-downloads/${CMAKE_TARBALL} .; \
     else \
-      echo "Downloading CMake from: https://cmake.org/files/v${CMAKE_VERSION_MAJOR}/${CMAKE_TARBALL}" \
+      echo "Downloading CMake from: https://cmake.org/files/v${CMAKE_VERSION_MAJOR}/${CMAKE_TARBALL}"; \
       wget -q https://cmake.org/files/v${CMAKE_VERSION_MAJOR}/${CMAKE_TARBALL}; \
       # Cache the downloaded file
       cp ${CMAKE_TARBALL} /cmake-downloads/; \
@@ -61,7 +61,7 @@ RUN set -eux; \
 RUN set -eux; \
     if [ "${ARCH}" = "aarch64" ]; then _LIB=sbsa; else _LIB="${ARCH}"; fi; \
     mkdir -p /usr/lib/${ARCH}-linux-gnu/; \
-    ln -sf /usr/local/cuda-${CUDA_VERSION}/targets/${_LIB}-linux/lib/stubs/libcuda.so /usr/lib/${ARCH}-linux-gnu/libcuda.so
+    ln -sf /usr/local/cuda-${CUDA_VERSION}/targets/${_LIB}-linux/lib/stubs/libcuda.so /usr/lib/${ARCH}-linux-gnu/libcuda.so || true
 
 # Install Python dependencies (torch + build tools)
 RUN --mount=type=cache,id=sgl-kernel-pip,target=/root/.cache/pip \
@@ -115,13 +115,13 @@ RUN --mount=type=cache,id=sgl-kernel-ccache,target=/ccache \
       export CMAKE_BUILD_PARALLEL_LEVEL=$(( $(nproc)/3 < 48 ? $(nproc)/3 : 48 )); \
     fi; \
     if [ -n "${ENABLE_CMAKE_PROFILE:-}" ]; then \
-      echo "CMake profiling enabled - will save to /sgl-kernel/cmake-profile.json" \
+      echo "CMake profiling enabled - will save to /sgl-kernel/cmake-profile.json"; \
       export CMAKE_ARGS="--profiling-output=/sgl-kernel/cmake-profile.json --profiling-format=google-trace"; \
     fi; \
     ${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation; \
     ./rename_wheels.sh; \
     if [ -n "${ENABLE_BUILD_PROFILE:-}" ] && [ -f /sgl-kernel/build/.ninja_log ]; then \
-      echo "Ninja build profiling enabled - will save to /sgl-kernel/build-trace.json" \
+      echo "Ninja build profiling enabled - will save to /sgl-kernel/build-trace.json"; \
       wget -q https://raw.githubusercontent.com/cradleapps/ninjatracing/084212eaf68f25c70579958a2ed67fb4ec2a9ca4/ninjatracing -O /tmp/ninjatracing; \
       if [ -f /tmp/ninjatracing ]; then ${PYTHON_ROOT_PATH}/bin/python /tmp/ninjatracing /sgl-kernel/build/.ninja_log > /sgl-kernel/build-trace.json; fi; \
     fi;
