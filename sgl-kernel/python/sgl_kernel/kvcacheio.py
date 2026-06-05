@@ -148,6 +148,58 @@ def transfer_kv_all_layer_lf_pf(
     )
 
 
+def is_transfer_kv_all_layer_fuse_lf_pf_available() -> bool:
+    """Whether the running ``sgl_kernel`` exposes ``transfer_kv_all_layer_fuse_lf_pf``.
+
+    The fused launcher is required by the SWA HiCache backup path that
+    handles asymmetric K/V (``head_dim != v_head_dim``, e.g. MiMo V2). It was
+    added after the original ``transfer_kv_all_layer_lf_pf`` op, so older
+    pre-built kernels do not register it. Callers that can degrade gracefully
+    (e.g. fall back to a non-fused path or a host copy) should gate on this
+    helper rather than catching ``AttributeError`` or ``RuntimeError`` from
+    the wrapper below.
+    """
+    return hasattr(torch.ops.sgl_kernel, "transfer_kv_all_layer_fuse_lf_pf")
+
+
+def transfer_kv_all_layer_fuse_lf_pf(
+    src_k_layers: torch.Tensor,
+    dst_k: torch.Tensor,
+    src_v_layers: torch.Tensor,
+    dst_v: torch.Tensor,
+    src_indices: torch.Tensor,
+    dst_indices: torch.Tensor,
+    item_size: int,
+    dst_layout_dim: int,
+    v_item_size: int,
+    v_dst_layout_dim: int,
+    num_layers: int,
+    block_quota: int = 2,
+    num_warps_per_block: int = 16 if _is_hip else 32,
+):
+    if not is_transfer_kv_all_layer_fuse_lf_pf_available():
+        raise RuntimeError(
+            "transfer_kv_all_layer_fuse_lf_pf is not available in the loaded "
+            "sgl_kernel build. Upgrade sgl-kernel, or gate the call site on "
+            "is_transfer_kv_all_layer_fuse_lf_pf_available()."
+        )
+    torch.ops.sgl_kernel.transfer_kv_all_layer_fuse_lf_pf.default(
+        src_k_layers,
+        dst_k,
+        src_v_layers,
+        dst_v,
+        src_indices,
+        dst_indices,
+        item_size,
+        dst_layout_dim,
+        v_item_size,
+        v_dst_layout_dim,
+        num_layers,
+        block_quota,
+        num_warps_per_block,
+    )
+
+
 def transfer_kv_all_layer_lf_ph(
     src_k_layers: torch.Tensor,
     dst_k: torch.Tensor,

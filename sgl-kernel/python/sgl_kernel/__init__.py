@@ -73,7 +73,9 @@ else:
     )
     from sgl_kernel.grammar import apply_token_bitmask_inplace_cuda
     from sgl_kernel.kvcacheio import (
+        is_transfer_kv_all_layer_fuse_lf_pf_available,
         transfer_kv_all_layer,
+        transfer_kv_all_layer_fuse_lf_pf,
         transfer_kv_all_layer_mla,
         transfer_kv_per_layer,
         transfer_kv_per_layer_mla,
@@ -178,6 +180,7 @@ else:
         "gptq_gemm",
         "gptq_shuffle",
         "int8_scaled_mm",
+        "is_transfer_kv_all_layer_fuse_lf_pf_available",
         "kimi_k2_moe_fused_gate",
         "merge_state_v2",
         "moe_align_block_size",
@@ -202,6 +205,7 @@ else:
         "topk_sigmoid",
         "topk_softmax",
         "transfer_kv_all_layer",
+        "transfer_kv_all_layer_fuse_lf_pf",
         "transfer_kv_all_layer_mla",
         "transfer_kv_per_layer",
         "transfer_kv_per_layer_mla",
