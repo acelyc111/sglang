@@ -3,7 +3,6 @@ import sys
 import pytest
 import torch
 from sgl_kernel.kvcacheio import (
-    is_transfer_kv_all_layer_fuse_lf_pf_available,
     transfer_kv_all_layer,
     transfer_kv_all_layer_direct_lf_pf,
     transfer_kv_all_layer_fuse_lf_pf,
@@ -924,12 +923,6 @@ def test_transfer_kv_all_layer_fuse_lf_pf_asymmetric(dtype, head_dim, v_head_dim
     function it is the *caller's* responsibility to pass the right V sizes,
     so the test passes them explicitly for both symmetric and asymmetric.
     """
-    if not is_transfer_kv_all_layer_fuse_lf_pf_available():
-        pytest.skip(
-            "transfer_kv_all_layer_fuse_lf_pf is not registered in the "
-            "loaded sgl_kernel build."
-        )
-
     torch.cuda.manual_seed(42)
     device = "cuda"
     num_pages_to_transfer = 4
@@ -1000,15 +993,6 @@ def test_transfer_kv_all_layer_fuse_lf_pf_asymmetric(dtype, head_dim, v_head_dim
             dst_v_host[dst_idx_cpu, layer_id],
             src_v_layers[layer_id][src_indices].cpu(),
         )
-
-
-def test_is_transfer_kv_all_layer_fuse_lf_pf_available_returns_bool():
-    """The probe helper must always be safe to call and must return a plain
-    bool. It is the documented hook for callers running against an older
-    sgl-kernel that has not registered the fused op.
-    """
-    result = is_transfer_kv_all_layer_fuse_lf_pf_available()
-    assert isinstance(result, bool)
 
 
 if __name__ == "__main__":
