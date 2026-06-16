@@ -97,6 +97,7 @@ class SWAComponent(TreeComponent):
         node.component_data[ct].value = value
         host_lru = self.cache.host_lru_lists[ct]
         if host_lru.in_list(node):
+            # TODO(yingchun): 为什么需要删除 host_lru_lists 中的 node？
             host_lru.remove_node(node)
         self.cache.lru_lists[ct].insert_mru(node)
         self.cache.component_evictable_size_[ct] += len(value)
@@ -177,8 +178,15 @@ class SWAComponent(TreeComponent):
             swa_evicted_seqlen % self.cache.page_size == 0
         ), f"{self.component_type}: swa_evicted_seqlen must be page-aligned, {swa_evicted_seqlen=}"
 
+        # [0......swa_evicted_seqlen......end)
+        #            ^                  ^
+        #            |                  |
+        #   已经在 SWA 维度被驱逐/释放  仍可能需要保留或写入 SWA cache
+
+        # [0......swa_evicted_seqlen......total_prefix_len......+prefix_len)
         if swa_evicted_seqlen <= total_prefix_len:
             # Branch 1: entire value_slice is within SWA window — recover
+            # TODO(yingchun): 为什么需要先 free 后再重新写入？之前的是什么值？按理说如果值一样，则不需要复写。
             self.cache.token_to_kv_pool_allocator.free(
                 node.component_data[BASE_COMPONENT_TYPE].value
             )
@@ -188,6 +196,7 @@ class SWAComponent(TreeComponent):
             )
             self._restore_device_value(node, swa_value)
             return 0
+        # [0......total_prefix_len......swa_evicted_seqlen......+prefix_len)
         elif swa_evicted_seqlen < total_prefix_len + prefix_len:
             # Branch 2: value_slice[start_idx:] is within SWA window — partial recover
             start_idx = swa_evicted_seqlen - total_prefix_len
@@ -203,6 +212,7 @@ class SWAComponent(TreeComponent):
             )
             self._restore_device_value(node, swa_value)
             return start_idx
+        # [0......total_prefix_len......+prefix_len......swa_evicted_seqlen)
         else:
             # Branch 3: entire value_slice is outside SWA window — not consumed
             return prefix_len
@@ -210,6 +220,9 @@ class SWAComponent(TreeComponent):
     def should_skip_leaf_creation(
         self, total_prefix_len: int, key_len: int, params: InsertParams
     ) -> bool:
+        # [0......total_prefix_len......+prefix_len......swa_evicted_seqlen)
+        # 这种情况时，如果创建新的 leaf 节点，他会完全处于 SWA eviction 的范围内，直接就是一个墓碑节点。
+        # 所以索性跳过创建。
         return params.swa_evicted_seqlen >= total_prefix_len + key_len
 
     def recover_after_unevict(
@@ -234,13 +247,16 @@ class SWAComponent(TreeComponent):
         ), f"{ct}: swa_evicted_seqlen must be page-aligned, {swa_evicted_seqlen=}"
 
         full_value = node.component_data[BASE_COMPONENT_TYPE].value
+        # [0......swa_evicted_seqlen......total_prefix_len......+prefix_len)
         if swa_evicted_seqlen <= total_prefix_len:
             swa_value = self._translate_full_to_swa(full_value)
+        # [0......total_prefix_len......swa_evicted_seqlen......+prefix_len)
         elif swa_evicted_seqlen < total_prefix_len + prefix_len:
             start_idx = swa_evicted_seqlen - total_prefix_len
             self.cache._split_node(node.key, node, start_idx)
             full_value = node.component_data[BASE_COMPONENT_TYPE].value
             swa_value = self._translate_full_to_swa(full_value)
+        # [0......total_prefix_len......+prefix_len......swa_evicted_seqlen)
         else:
             return
         self._restore_device_value(node, swa_value)
@@ -258,6 +274,7 @@ class SWAComponent(TreeComponent):
         node_start = result.prefix_len
         split_pos = params.swa_evicted_seqlen - node_start
 
+        # [0......swa_evicted_seqlen......prefix_len......+len(node.key))
         if split_pos <= 0:
             swa_value = self._translate_full_to_swa(
                 node.component_data[BASE_COMPONENT_TYPE].value
@@ -265,6 +282,7 @@ class SWAComponent(TreeComponent):
             node.component_data[self.component_type].value = swa_value
             self.cache.lru_lists[self.component_type].insert_mru(node)
             self.cache.component_evictable_size_[self.component_type] += len(swa_value)
+        # [0......prefix_len......swa_evicted_seqlen......+len(node.key))
         elif split_pos < len(node.key):
             # Node straddles the SWA eviction boundary
             # Split into parent (tombstone, no SWA) and child (with SWA)
@@ -276,6 +294,7 @@ class SWAComponent(TreeComponent):
             node.component_data[self.component_type].value = swa_value
             self.cache.lru_lists[self.component_type].insert_mru(node)
             self.cache.component_evictable_size_[self.component_type] += len(swa_value)
+        # [0......prefix_len......+len(node.key)......swa_evicted_seqlen)
         else:
             # Entire leaf is outside the SWA window — left as a tombstone.
             return
