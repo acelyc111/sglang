@@ -457,6 +457,7 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         }
         self.session.slots.clear()
 
+        #  当前 Full KV 在 GPU 上、无锁、且下面没有更深 Full-GPU 子节点的可驱逐树叶集合
         self.evictable_device_leaves: set[UnifiedTreeNode] = set()
         self.evictable_host_leaves: set[UnifiedTreeNode] = set()
         self.host_lru_lists = {

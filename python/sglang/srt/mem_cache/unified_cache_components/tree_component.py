@@ -45,7 +45,7 @@ class ComponentType(int, Enum):
 
     @property
     def is_swa(self) -> bool:
-        return self == ComponentType.SWA
+        return self == ComponentType.SWA or self == ComponentType.WINDOWED_SWA
 
     @property
     def is_mamba(self) -> bool:

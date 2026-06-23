@@ -59,6 +59,11 @@ class SWAComponent(TreeComponent):
         self.sliding_window_size = params.sliding_window_size
         # HiCache state: set to host SWA pool when HiCache enabled
         self._swa_kv_pool_host = None
+        self.sw_pages = (
+            self.sliding_window_size + self.cache.page_size - 1
+        ) // self.cache.page_size
+        assert self.sw_pages > 0
+        self.sw_tokens = self.sw_pages * self.cache.page_size
 
     component_type = ComponentType.SWA
 
@@ -352,13 +357,18 @@ class SWAComponent(TreeComponent):
             ].clone()
             host_lru = self.cache.host_lru_lists[self.component_type]
             if new_parent.component_data[self.component_type].value is None:
+                # 如果 new_parent 没有 device SWA 数据，但有刚切出来的 host_value，那它是一个 host-only SWA 节点（很珍贵），
+                # 需要加入 host LRU，标记为 host 侧可管理/可驱逐。
                 host_lru.insert_mru(new_parent)
             if child.component_data[
                 self.component_type
             ].value is None and not host_lru.in_list(child):
+                # 如果 child 也没有 device SWA 数据、只有 host SWA 数据（很珍贵），并且它还不在 host LRU 中，就把它加入 host LRU。
                 host_lru.insert_mru(child)
 
         # parent inherits the swa_uuid from child for swa lock ref
+        # split 节点时，把 SWA lock 的停止边界 uuid 从旧 child 转移到新 parent，
+        # 保证后续 dec_lock_ref 解锁范围仍然和 split 前一致。
         new_parent.component_data[self.component_type].metadata["uuid"] = (
             child.component_data[self.component_type].metadata.get("uuid")
         )
@@ -449,13 +459,14 @@ class SWAComponent(TreeComponent):
         uuid_key = "host_uuid" if lock_host else "uuid"
         lru = self.cache.host_lru_lists[ct] if lock_host else self.cache.lru_lists[ct]
 
-        # Tombstoned nodes (cd.value is None) have no SWA chunk to protect
+        # Tombstoned nodes (cd.value/host_value is None) have no SWA chunk to protect,
         # skip them and keep walking up. This path is hit when HiCache
         # backs up a FULL present internal node whose SWA was already evicted.
         cur = node
         while cur != root and swa_lock_size < sliding_window_size:
             comp = cur.component_data[ct]
             value = comp.host_value if lock_host else comp.value
+            # TODO(yingchun): 这里是不是 bug？应该需要连续的 SWA 长度，而不是累积的 SWA 长度。
             if value is None:
                 result.skip_lock_node_ids.setdefault(ct, set()).add(cur.id)
                 cur = cur.parent
@@ -464,6 +475,7 @@ class SWAComponent(TreeComponent):
             ref = comp.host_lock_ref if lock_host else comp.lock_ref
             if ref == 0:
                 if lock_host:
+                    # TODO(yingchun): 非 lock_host 时，device 的 lru 需要同样更新吗？
                     if lru.in_list(cur):
                         lru.remove_node(cur)
                 else:
@@ -504,17 +516,19 @@ class SWAComponent(TreeComponent):
         dec_swa = True
         uuid_key = "host_uuid" if lock_host else "uuid"
 
-        # A node in skip_lock_node_ids was a tombstone when this lock was acquired.
         cur = node
         while cur != root and dec_swa:
             comp = cur.component_data[ct]
             if cur.id in skip_lock_node_ids:
+                # A node in skip_lock_node_ids was a tombstone when this lock was acquired.
                 cur = cur.parent
                 continue
+
             ref = comp.host_lock_ref if lock_host else comp.lock_ref
             if ref == 0:
                 cur = cur.parent
                 continue
+
             if ref == 1:
                 if lock_host:
                     if comp.value is None and comp.host_value is not None:
@@ -587,6 +601,7 @@ class SWAComponent(TreeComponent):
             insert_params.swa_evicted_seqlen = req.swa_evicted_seqlen
         return None
 
+    # TODO(yingchun): 功能移到 prepare_for_caching_req 中更合理、更统一？
     def free_out_of_window_slots(
         self, req: Req, pre_len: int, insert_params: InsertParams
     ) -> None:
@@ -681,23 +696,19 @@ class SWAComponent(TreeComponent):
 
         if phase == CacheTransferPhase.PREFETCH:
             # Require a full sliding window.
-            sw_pages = (
-                self.sliding_window_size + self.cache.page_size - 1
-            ) // self.cache.page_size
-            if sw_pages == 0 or prefetch_tokens // self.cache.page_size < sw_pages:
+            if prefetch_tokens // self.cache.page_size < self.sw_pages:
                 return None
-            num_tokens = sw_pages * self.cache.page_size
-            host_indices = self._swa_kv_pool_host.alloc(num_tokens)
+            host_indices = self._swa_kv_pool_host.alloc(self.sw_tokens)
             if host_indices is None:
-                self.cache.evict_host(num_tokens, ComponentType.SWA)
-                host_indices = self._swa_kv_pool_host.alloc(num_tokens)
+                self.cache.evict_host(self.sw_tokens, ComponentType.SWA)
+                host_indices = self._swa_kv_pool_host.alloc(self.sw_tokens)
             if host_indices is None:
                 return []
             return [
                 PoolTransfer(
                     name=PoolName.SWA,
                     host_indices=host_indices,
-                    keys=["__placeholder__"] * sw_pages,
+                    keys=["__placeholder__"] * self.sw_pages,
                     hit_policy=PoolHitPolicy.TRAILING_PAGES,
                 )
             ]
