@@ -790,7 +790,11 @@ class SWAComponent(TreeComponent):
         insert_result: Optional[InsertResult] = None,
         pool_storage_result: Optional[PoolTransferResult] = None,
     ) -> None:
-        """Fill the prefetched SWA window onto the leaf→anchor path.
+        """
+        把从 L3 storage 预取到 host 的一段 SWA 数据，按 token 区间填回 leaf→anchor
+        路径上的 SWA host tombstone 节点。
+
+        Fill the prefetched SWA window onto the leaf→anchor path.
 
         All-or-nothing over one full window: ``loaded_pages`` is the cross-rank
         MIN, so ``loaded_pages < window_pages`` drops the whole window (keeps the
@@ -812,6 +816,8 @@ class SWAComponent(TreeComponent):
             else 0
         )
         target = insert_result.inserted_host_node if insert_result else None
+        # 任一 rank 没凑齐整个 sliding window 的页数，就整窗丢弃并释放 host 索引。
+        # 这样保证所有 TP rank 上的树结构一致，不会出现某些 rank 填了、某些没填的分叉。
         if (
             target is None
             or window_require_pages == 0
@@ -836,17 +842,21 @@ class SWAComponent(TreeComponent):
             cd = cur.component_data[ct]
             if cd.host_value is None and fill_len > 0:
                 # Tombstone: split off the in-buffer tail if needed, then fill.
+                # 对 SWA host tombstone 节点：必要时按边界 split，再把预取来的 host 索引切片挂上去，
+                # 让它变成 host-resident 的 SWA 数据。
                 if fill_start > node_start:
                     self.cache._split_node(cur.key, cur, fill_start - node_start)
                 self._attach_swa_host_value(cur, slice_)
             else:
                 # Already has SWA (or empty overlap): drop this slice.
+                # 对已有 SWA host 数据的节点：这段重复，直接释放。
                 self._release_swa_host(slice_)
 
             pos = node_start
             cur = cur.parent
 
         # Buffer prefix that fell outside the anchor→leaf path.
+        # 走到 anchor 还没用完的那部分缓冲也释放掉。
         if pos > loaded_start:
             self._release_swa_host(host_indices[: pos - loaded_start])
 
