@@ -191,7 +191,8 @@ class SWAComponent(TreeComponent):
         # [0......swa_evicted_seqlen......total_prefix_len......+prefix_len)
         if swa_evicted_seqlen <= total_prefix_len:
             # Branch 1: entire value_slice is within SWA window — recover
-            # TODO(yingchun): 为什么需要先 free 后再重新写入？之前的是什么值？按理说如果值一样，则不需要复写。
+            # Q: 为什么需要先 free 后再重新写入？之前的是什么值？按理说如果值一样，则不需要复写。
+            # A: 这是因为在 caller 处，仅会对 consumed_from 之前的部分做 free，那么这里做 consumed_from 之后的 free 才不会有泄露
             self.cache.token_to_kv_pool_allocator.free(
                 node.component_data[BASE_COMPONENT_TYPE].value
             )
@@ -357,13 +358,13 @@ class SWAComponent(TreeComponent):
             ].clone()
             host_lru = self.cache.host_lru_lists[self.component_type]
             if new_parent.component_data[self.component_type].value is None:
-                # 如果 new_parent 没有 device SWA 数据，但有刚切出来的 host_value，那它是一个 host-only SWA 节点（很珍贵），
+                # 如果 new_parent 没有 device SWA 数据，但有刚切出来的 host_value，那它是一个 host-only SWA 节点，
                 # 需要加入 host LRU，标记为 host 侧可管理/可驱逐。
                 host_lru.insert_mru(new_parent)
             if child.component_data[
                 self.component_type
             ].value is None and not host_lru.in_list(child):
-                # 如果 child 也没有 device SWA 数据、只有 host SWA 数据（很珍贵），并且它还不在 host LRU 中，就把它加入 host LRU。
+                # 如果 child 没有 device SWA 数据、只有 host SWA 数据，并且它还不在 host LRU 中，就把它加入 host LRU。
                 host_lru.insert_mru(child)
 
         # parent inherits the swa_uuid from child for swa lock ref
