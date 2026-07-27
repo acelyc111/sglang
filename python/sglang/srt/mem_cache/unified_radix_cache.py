@@ -1513,6 +1513,7 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
                 self.evictable_device_leaves.discard(node)
                 parent = node.parent
                 self._remove_leaf_from_parent(node)
+                # TODO(yingchun): 下面会 _iteratively_delete_tombstone_leaf，这里单独更新 parent 没有必要？
                 self._update_evictable_leaf_sets(parent)
                 self._iteratively_delete_tombstone_leaf(node, tracker)
                 return
@@ -1989,6 +1990,7 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
                 operation
             )
         else:
+            # TODO(yingchun): 可以直接 assert 掉
             return True
         if (
             completed
